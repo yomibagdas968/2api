@@ -1,95 +1,114 @@
-# Particle Exchange Visualization
+# Particle Exchange — Spectral Vortex
 
-An interactive full-stack particle visualization featuring two draggable vortex
-systems, 1000+ glowing particles with trails and color shifting, bloom
-post-processing, lightning arcs, shockwaves, and a real-time stats link to a
-Node.js backend over WebSocket.
+An interactive particle visualization: up to 2000 glowing particles orbit
+draggable vortex cores, with comet trails, a connection web, energy arcs,
+shockwaves, bloom post-processing, four color themes, and optional webcam
+hand-gesture control. Served by a zero-dependency Node.js server.
 
 ## Features
 
-**Frontend (Vanilla JS + Canvas 2D)**
-- Full-screen canvas with 200–2000 particles
-- Two draggable vortex cores with rotating spiral arms
-- Multi-layer glow per particle (hot core + mid glow + halo), cached as sprites
-- Color-shifting particles cycling blue → cyan → orange → purple
-- Particle trails with gradient fade
-- Bloom post-processing (downscaled + blurred additive pass)
-- Connection web between nearby particles (spatial-hash accelerated)
-- Shockwave rings when a vortex reverses direction
-- Lightning arcs between the two vortices
-- Pre-rendered nebula + starfield background
-- Mouse trail glow effect
-- FPS counter and particle count HUD
-- Live server stats panel fed by WebSocket
+**Rendering (Vanilla JS + Canvas 2D)**
+- Full-screen canvas with 200–2000 particles (rare blazing comets among them)
+- Up to 4 vortex cores with rotating spiral arms and layered glow
+- Particle halo/glow/core baked into pre-rendered sprites (one `drawImage`
+  per particle instead of three gradient fills)
+- Color ramp over each particle's lifetime, quantized into cached sprite
+  and stroke-color steps — no per-frame color-string allocation
+- Fading particle trails and a spatial-hash-accelerated connection web
+- Energy arcs flickering between every pair of vortices
+- Shockwave rings with power-scaled push, screen shake and flash
+- Bloom post-processing (quarter-resolution blurred additive pass)
+- Pre-rendered nebula + starfield background with live twinkling stars
+- FPS / particle count / mode HUD
 
-**Backend (Node.js + Express + ws)**
-- `GET /` — serves the frontend
-- `GET /api/particles` — current particle configuration (count, colors, vortices, speed)
-- `POST /api/particles` — update configuration (validated and clamped)
-- `GET /api/stats` — real-time stats (active particles, fps, connections, uptime)
-- `GET /health` — health check
-- `ws://host/ws` — WebSocket broadcasting stats every 500ms; accepts client
-  fps/particle reports; pushes config changes to all connected clients
-- CORS enabled on all routes
+**Interaction**
+- Drag, reverse and add/remove vortex cores
+- Fluid stir: sweeping the pointer drags nearby particles along, like a hand
+  swept through water
+- Charge singularity: hold on empty space to gather particles into a
+  spiraling well, release for a nova burst scaled by charge time
+  (a quick tap emits a gentle ripple)
+- Attract / repulse modes, supernova bursts, slow-motion, pause, themes
+- Optional webcam hand gestures via MediaPipe Hands (loaded from CDN)
+
+**Backend (zero-dependency Node.js)**
+- Serves the static frontend with path-traversal protection
+- `GET /api/config` — initial client configuration (`particles`, `theme`),
+  overridable via the `PARTICLES` and `THEME` environment variables
+- `GET /api/health` — liveness probe with uptime
 
 ## Interactions
 
 | Action | Effect |
 | --- | --- |
 | Drag vortex core | Reposition the vortex |
-| Click vortex | Reverse its rotation (with shockwave + lightning) |
+| Click vortex core | Reverse its rotation (+shockwave) |
+| Hold empty space | Charge a singularity that gathers particles |
+| Release hold | Nova burst — power scales with charge time |
+| Quick tap | Gentle ripple |
+| Sweep mouse | Stir the particle flow |
+| Move mouse | Attract nearby particles |
+| Hold Shift | Repel nearby particles |
+| Right-click | Supernova |
 | Scroll wheel | Change particle count (200–2000) |
 | Double-click | Reset the scene |
-| Move mouse | Attract nearby particles |
-| Shift + mouse | Repel nearby particles |
+| `V` / `X` | Add / remove a vortex (max 4) |
+| `1`–`4` | Switch color theme (Spectral, Inferno, Aurora, Neon) |
+| `Space` | Slow motion while held |
+| `P` | Pause / resume |
+| `G` | Toggle webcam gestures |
+
+**Webcam gestures** (after pressing `G`; needs camera permission and CDN access):
+☝ point = attract · ✊ fist = repulse · 🤏 pinch = grab a core · ✌ victory = supernova
 
 ## Getting Started
 
+No dependencies to install:
+
 ```bash
-npm install
-npm start
+npm start          # or: node server.js
 ```
 
 Then open <http://localhost:3000>.
 
-Set a custom port with `PORT=8080 npm start`.
+Configuration via environment variables:
+
+```bash
+PORT=8080 PARTICLES=1600 THEME=2 npm start
+```
+
+Webcam gestures require a secure context (`http://localhost` or HTTPS).
 
 ## API Examples
 
 ```bash
-# Get config
-curl http://localhost:3000/api/particles
-
-# Update particle count and speed
-curl -X POST http://localhost:3000/api/particles \
-  -H "Content-Type: application/json" \
-  -d '{"count": 1500, "speed": 1.5}'
-
-# Live stats
-curl http://localhost:3000/api/stats
+# Initial client config
+curl http://localhost:3000/api/config
 
 # Health check
-curl http://localhost:3000/health
+curl http://localhost:3000/api/health
 ```
 
 ## Project Structure
 
 ```
 .
-├── package.json        # Dependencies (express, ws)
-├── server.js           # Express + WebSocket backend
-├── public/
-│   ├── index.html      # Page shell, HUD, stats panel
-│   ├── style.css       # Glassmorphism panels + layout
-│   └── app.js          # Particle engine, physics, effects, WS client
-└── README.md
+├── package.json    # Metadata only — no runtime dependencies
+├── server.js       # Zero-dependency static + API server
+├── index.html      # Page shell, HUD, help overlay
+├── style.css       # HUD / overlay styles
+└── app.js          # Particle engine, physics, effects, gestures
 ```
 
 ## Performance Notes
 
-- Glow rendering uses pre-baked radial-gradient sprites bucketed by hue
-  (64 buckets) instead of per-frame gradients.
-- The connection web uses a spatial hash grid and samples a particle subset
-  at high counts to stay O(n) in practice.
-- Bloom renders the frame at quarter resolution, blurs it, and composites it
-  additively — much cheaper than full-resolution blur.
+- Particle glow (halo + mid glow + core) is baked into sprites quantized to
+  48 steps along the theme's color ramp; trails and connection lines reuse
+  cached color strings with `globalAlpha`, so the hot loops allocate no
+  strings.
+- Vortex core glow is baked once per hue instead of building three radial
+  gradients per vortex per frame.
+- The connection web uses a spatial hash grid with packed integer keys and
+  a per-frame segment budget to stay O(n) in practice.
+- Bloom renders the frame at quarter resolution, blurs it, and composites
+  it additively — much cheaper than a full-resolution blur.

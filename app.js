@@ -94,6 +94,7 @@ let RAMP = THEMES[0].ramp;
 function setTheme(i) {
   themeIndex = ((i % THEMES.length) + THEMES.length) % THEMES.length;
   RAMP = THEMES[themeIndex].ramp;
+  rebuildSprites();
   buildNebula();
   themeEl.textContent = 'THEME: ' + THEMES[themeIndex].name;
   showBanner('◈ ' + THEMES[themeIndex].name + ' ◈');
@@ -162,6 +163,47 @@ function rampColor(t) {
 }
 function hsla(c, a) { return `hsla(${c.h|0},${c.s|0}%,${c.l|0}%,${a})`; }
 
+// ============================== SPRITE CACHES ==============================
+// Drawing a particle used to mean three arc fills plus fresh hsla() strings
+// every frame. Instead, the halo/glow/core stack is baked into one sprite per
+// quantized ramp position and blitted with a single drawImage. Rebuilt only
+// on theme change.
+const RAMP_STEPS = 48;
+const SPRITE_R = 48;                 // baked halo radius, px
+let particleSprites = [];            // [step] -> canvas (halo = 7 x core size)
+let cometSprites = [];               // [step] -> canvas (halo = 9 x core size)
+let rampStrokes = [];                // [step] -> solid color for trails/links
+
+function bakeSprite(col, haloRatio, haloAlpha) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SPRITE_R * 2;
+  const c = cv.getContext('2d');
+  c.globalCompositeOperation = 'lighter';
+  const disc = (r, style) => {
+    c.fillStyle = style;
+    c.beginPath(); c.arc(SPRITE_R, SPRITE_R, r, 0, 6.2832); c.fill();
+  };
+  disc(SPRITE_R, hsla(col, haloAlpha));                                  // outer halo
+  disc(SPRITE_R * 2.8 / haloRatio, hsla(col, 0.22));                     // mid glow
+  disc(SPRITE_R / haloRatio, hsla({ h: col.h, s: col.s * 0.5, l: 88 }, 0.95)); // core
+  return cv;
+}
+
+function rebuildSprites() {
+  particleSprites = []; cometSprites = []; rampStrokes = [];
+  for (let i = 0; i < RAMP_STEPS; i++) {
+    const col = rampColor(i / (RAMP_STEPS - 1));
+    particleSprites.push(bakeSprite(col, 7, 0.05));
+    cometSprites.push(bakeSprite(col, 9, 0.09));
+    rampStrokes.push(hsla(col, 1));
+  }
+}
+
+function rampStep(t) {
+  const i = (t * RAMP_STEPS) | 0;
+  return i < 0 ? 0 : i >= RAMP_STEPS ? RAMP_STEPS - 1 : i;
+}
+
 // ============================== VORTICES ==============================
 const VORTEX_HUES = [195, 25, 120, 300];
 const MAX_VORTICES = 4;
@@ -175,6 +217,27 @@ function makeVortex(x, y, dir, hue) {
     dragging: false
   };
 }
+// Layered core glow baked once per hue instead of three radial gradients
+// per vortex per frame.
+const vortexSprites = new Map();
+function vortexSprite(hue) {
+  let cv = vortexSprites.get(hue);
+  if (cv) return cv;
+  cv = document.createElement('canvas');
+  cv.width = cv.height = 120;
+  const c = cv.getContext('2d');
+  c.globalCompositeOperation = 'lighter';
+  for (const L of [{ r: 60, a: 0.10 }, { r: 34, a: 0.22 }, { r: 18, a: 0.5 }]) {
+    const g = c.createRadialGradient(60, 60, 0, 60, 60, L.r);
+    g.addColorStop(0, `hsla(${hue},100%,70%,${L.a})`);
+    g.addColorStop(1, `hsla(${hue},100%,50%,0)`);
+    c.fillStyle = g;
+    c.beginPath(); c.arc(60, 60, L.r, 0, 6.2832); c.fill();
+  }
+  vortexSprites.set(hue, cv);
+  return cv;
+}
+
 let vortices = [];
 function resetVortices() {
   vortices = [
@@ -238,12 +301,80 @@ function adjustPopulation() {
 let shockwaves = [];
 let shake = 0, shakeX = 0, shakeY = 0;
 
-function emitShockwave(x, y, hue) {
-  shockwaves.push({ x, y, r: 10, maxR: Math.max(W, H) * 0.6, age: 0, life: 1.1, hue });
-  shake = Math.max(shake, 10);
-  const fl = document.getElementById('flash');
-  fl.style.transition = 'none'; fl.style.opacity = '0.6';
-  requestAnimationFrame(() => { fl.style.transition = 'opacity .5s ease-out'; fl.style.opacity = '0'; });
+function emitShockwave(x, y, hue, power = 1) {
+  // power scales the ring reach, particle push, screen shake and flash;
+  // 1 = the classic vortex-reversal wave, <0.5 = a subtle ripple.
+  const reach = Math.min(1.3, 0.55 + power * 0.45);
+  shockwaves.push({ x, y, r: 10, maxR: Math.max(W, H) * 0.6 * reach, age: 0, life: 1.1, hue, power });
+  shake = Math.max(shake, 10 * power);
+  if (power >= 0.5) {
+    const fl = document.getElementById('flash');
+    fl.style.transition = 'none'; fl.style.opacity = '0.6';
+    requestAnimationFrame(() => { fl.style.transition = 'opacity .5s ease-out'; fl.style.opacity = '0'; });
+  }
+}
+
+// ============================== CHARGE WELL (singularity) ==============================
+// Press and hold on empty space: a singularity forms under the pointer and
+// gathers particles while it charges. Release to detonate — the longer the
+// hold, the bigger the nova burst. A quick tap emits a gentle ripple.
+const WELL_MAX_CHARGE = 2.5;   // seconds to full power
+const well = { active: false, x: 0, y: 0, charge: 0 };
+
+function cancelWell() { well.active = false; well.charge = 0; }
+
+function releaseWell() {
+  if (!well.active) return;
+  const c = well.charge;
+  well.active = false;
+  well.charge = 0;
+  if (c < 0.15) {  // quick tap → soft ripple
+    emitShockwave(well.x, well.y, 200, 0.35);
+    return;
+  }
+  const k = c / WELL_MAX_CHARGE;
+  const hue = 190 + k * 110;
+  emitShockwave(well.x, well.y, hue, 0.7 + k * 1.3);
+  // fling everything the well gathered
+  const R = 170 + k * 230, R2 = R * R;
+  const kick = 320 + k * 620;
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    const dx = p.x - well.x, dy = p.y - well.y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 > R2 || d2 < 1) continue;
+    const d = Math.sqrt(d2);
+    const f = (1 - d / R) * kick;
+    p.vx += (dx / d) * f;
+    p.vy += (dy / d) * f;
+  }
+  const nSparks = (25 + k * 75) | 0;
+  for (let i = 0; i < nSparks; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const sp = 100 + Math.random() * (200 + k * 400);
+    addSpark(well.x, well.y, Math.cos(ang) * sp, Math.sin(ang) * sp, hue);
+  }
+  if (k > 0.8) showBanner('✦ NOVA BURST ✦');
+}
+
+function drawWell(time) {
+  if (!well.active) return;
+  const c = well.charge / WELL_MAX_CHARGE;
+  const hue = 190 + c * 110;   // cyan → violet as it charges
+  ctx.globalCompositeOperation = 'lighter';
+  // rings collapsing inward — reads as "being sucked in"
+  for (let i = 0; i < 3; i++) {
+    const t = (time * (0.9 + c * 1.6) + i / 3) % 1;
+    const r = (1 - t) * (90 + c * 110);
+    ctx.strokeStyle = `hsla(${hue},100%,70%,${t * (0.25 + c * 0.4)})`;
+    ctx.lineWidth = 1 + c * 1.5;
+    ctx.beginPath(); ctx.arc(well.x, well.y, r, 0, 6.2832); ctx.stroke();
+  }
+  // hot core grows with charge
+  ctx.fillStyle = `hsla(${hue},100%,80%,${0.25 + c * 0.55})`;
+  ctx.beginPath();
+  ctx.arc(well.x, well.y, 3.5 + c * 10 + Math.sin(time * 9) * c * 2, 0, 6.2832);
+  ctx.fill();
 }
 
 // ============================== SPARKS ==============================
@@ -357,7 +488,9 @@ function drawEnergyArcs(dt) {
 }
 
 // ============================== MOUSE / TOUCH ==============================
-const mouse = { x: -9999, y: -9999, active: false, shift: false };
+const mouse = { x: -9999, y: -9999, active: false, shift: false, vx: 0, vy: 0 };
+const prevMouse = { x: -9999, y: -9999, active: false };
+const MOUSE_MAX_SPEED = 3200;   // caps the stir force from a flicked pointer
 const mouseTrail = [];   // delayed chain following cursor
 const CHAIN = 14;
 for (let i = 0; i < CHAIN; i++) mouseTrail.push({ x: -9999, y: -9999 });
@@ -377,12 +510,14 @@ function pointerDown(x, y) {
   const v = pickVortex(x, y);
   downPos.x = x; downPos.y = y; dragMoved = 0;
   if (v) { dragVortex = v; v.dragging = true; }
+  else { well.active = true; well.charge = 0; well.x = x; well.y = y; }
 }
 function pointerMove(x, y) {
   if (dragVortex) {
     dragMoved += Math.hypot(x - mouse.x, y - mouse.y);
     dragVortex.x = x; dragVortex.y = y;
   }
+  if (well.active) { well.x = x; well.y = y; }
   mouse.x = x; mouse.y = y; mouse.active = true;
 }
 function pointerUp() {
@@ -394,12 +529,13 @@ function pointerUp() {
     dragVortex.dragging = false;
     dragVortex = null;
   }
+  releaseWell();  // no-op unless a well was charging
 }
 
 canvas.addEventListener('mousedown', e => { if (e.button === 0) pointerDown(e.clientX, e.clientY); });
 window.addEventListener('mousemove', e => pointerMove(e.clientX, e.clientY));
 window.addEventListener('mouseup', pointerUp);
-document.addEventListener('mouseleave', () => { mouse.active = false; });
+document.addEventListener('mouseleave', () => { mouse.active = false; cancelWell(); });
 
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
@@ -461,6 +597,7 @@ canvas.addEventListener('wheel', e => {
 }, { passive: false });
 
 canvas.addEventListener('dblclick', () => {
+  cancelWell();
   resetVortices();
   targetCount = 1200;
   particles.length = 0;
@@ -723,11 +860,14 @@ function showBanner(text) {
 
 // ============================== SPATIAL GRID (connections) ==============================
 const CELL = 70;
+// Cell coords packed into one integer key (offset keeps them positive) —
+// avoids building and re-parsing "x,y" strings every frame.
+const GRID_HALF = 512, GRID_SPAN = 1024;
 function buildGrid() {
   const grid = new Map();
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
-    const key = ((p.x / CELL) | 0) + ',' + ((p.y / CELL) | 0);
+    const key = (((p.x / CELL) | 0) + GRID_HALF) * GRID_SPAN + (((p.y / CELL) | 0) + GRID_HALF);
     let arr = grid.get(key);
     if (!arr) grid.set(key, arr = []);
     arr.push(p);
@@ -767,24 +907,43 @@ function updateParticle(p, dt) {
     }
   }
 
-  // mouse attraction / shift-repulsion
-  if (mouse.active) {
+  // mouse attraction / shift-repulsion / fluid stir
+  if (mouse.active && !well.active) {
     const mdx = mouse.x - p.x, mdy = mouse.y - p.y;
     const md2 = mdx * mdx + mdy * mdy;
     if (md2 < 180 * 180 && md2 > 4) {
       const md = Math.sqrt(md2);
-      const mf = (1 - md / 180) * 620 * (mouse.shift ? -1.6 : 1);
+      const w = 1 - md / 180;
+      const mf = w * 620 * (mouse.shift ? -1.6 : 1);
       ax += (mdx / md) * mf; ay += (mdy / md) * mf;
+      // stir: a fast-moving pointer drags nearby particles along with it,
+      // like a hand swept through water
+      ax += mouse.vx * w * 2.2;
+      ay += mouse.vy * w * 2.2;
+    }
+  }
+
+  // charge well: gathers particles in a swirl while held
+  if (well.active) {
+    const wdx = well.x - p.x, wdy = well.y - p.y;
+    const wd2 = wdx * wdx + wdy * wdy;
+    const wr = 220 + well.charge * 170;
+    if (wd2 < wr * wr && wd2 > 25) {
+      const wd = Math.sqrt(wd2);
+      const wf = (1 - wd / wr) * (900 + well.charge * 1500);
+      // inward pull with a tangential component so captures spiral, not clump
+      ax += (wdx / wd) * wf * 0.8 + (-wdy / wd) * wf * 0.45;
+      ay += (wdy / wd) * wf * 0.8 + ( wdx / wd) * wf * 0.45;
     }
   }
 
   // shockwave push
   for (const s of shockwaves) {
     const sdx = p.x - s.x, sdy = p.y - s.y;
-    const sd = Math.hypot(sdx, sdy);
+    const sd = Math.sqrt(sdx * sdx + sdy * sdy);
     const band = Math.abs(sd - s.r);
     if (band < 42 && sd > 1) {
-      const push = (1 - band / 42) * 2400 * (1 - s.age / s.life);
+      const push = (1 - band / 42) * 2400 * s.power * (1 - s.age / s.life);
       ax += (sdx / sd) * push; ay += (sdy / sd) * push;
     }
   }
@@ -826,22 +985,22 @@ function drawParticles(time) {
 
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
-    const t = p.life / p.maxLife;
     const env = envelope(p);
     if (env <= 0.01) continue;
 
-    const col = rampColor(Math.min(1, t + p.colorOffset));
+    const step = rampStep(p.life / p.maxLife + p.colorOffset);
     const pulse = 1 + 0.35 * Math.sin(time * p.pulseFreq + p.pulsePhase);
     const size = p.size * pulse;
 
-    // ---- trail (fading gradient segments) ----
+    // ---- trail (fading segments, one cached color per particle) ----
     const tr = p.trail;
     const n = tr.length / 2;
     if (n > 2) {
+      ctx.strokeStyle = rampStrokes[step];
       const trailBoost = p.comet ? 1.9 : 1.1;
+      const alphaScale = (p.comet ? 0.5 : 0.30) * env;
       for (let j = 1; j < n; j++) {
-        const a = (j / n) * (p.comet ? 0.5 : 0.30) * env;
-        ctx.strokeStyle = hsla(col, a);
+        ctx.globalAlpha = (j / n) * alphaScale;
         ctx.lineWidth = size * (j / n) * trailBoost;
         ctx.beginPath();
         ctx.moveTo(tr[(j - 1) * 2], tr[(j - 1) * 2 + 1]);
@@ -850,24 +1009,13 @@ function drawParticles(time) {
       }
     }
 
-    // ---- outer halo ----
-    ctx.fillStyle = hsla(col, (p.comet ? 0.09 : 0.05) * env);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, size * (p.comet ? 9 : 7), 0, 6.2832);
-    ctx.fill();
-
-    // ---- mid glow ----
-    ctx.fillStyle = hsla(col, 0.22 * env);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, size * 2.8, 0, 6.2832);
-    ctx.fill();
-
-    // ---- inner core ----
-    ctx.fillStyle = hsla({ h: col.h, s: col.s * 0.5, l: 88 }, 0.95 * env);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, size, 0, 6.2832);
-    ctx.fill();
+    // ---- halo + mid glow + core in one pre-baked sprite ----
+    const r = size * (p.comet ? 9 : 7);
+    ctx.globalAlpha = env;
+    ctx.drawImage(p.comet ? cometSprites[step] : particleSprites[step],
+      p.x - r, p.y - r, r * 2, r * 2);
   }
+  ctx.globalAlpha = 1;
 }
 
 function drawConnections() {
@@ -878,13 +1026,13 @@ function drawConnections() {
   ctx.lineWidth = 0.6;
 
   for (const [key, cell] of grid) {
-    const [cx, cy] = key.split(',').map(Number);
     for (let a = 0; a < cell.length && budget > 0; a++) {
       const p = cell[a];
+      ctx.strokeStyle = rampStrokes[rampStep(p.life / p.maxLife)];
       // same cell + right/down neighbors to avoid dupes
       for (let ox = 0; ox <= 1 && budget > 0; ox++) {
         for (let oy = (ox === 0 ? 0 : -1); oy <= 1 && budget > 0; oy++) {
-          const other = (ox === 0 && oy === 0) ? cell : grid.get((cx + ox) + ',' + (cy + oy));
+          const other = (ox === 0 && oy === 0) ? cell : grid.get(key + ox * GRID_SPAN + oy);
           if (!other) continue;
           const start = (other === cell) ? a + 1 : 0;
           for (let b = start; b < other.length && budget > 0; b++) {
@@ -892,9 +1040,7 @@ function drawConnections() {
             const dx = p.x - q.x, dy = p.y - q.y;
             const d2 = dx * dx + dy * dy;
             if (d2 < MAXD2) {
-              const alpha = (1 - d2 / MAXD2) * 0.10;
-              const col = rampColor(p.life / p.maxLife);
-              ctx.strokeStyle = hsla(col, alpha);
+              ctx.globalAlpha = (1 - d2 / MAXD2) * 0.10;
               ctx.beginPath();
               ctx.moveTo(p.x, p.y);
               ctx.lineTo(q.x, q.y);
@@ -906,22 +1052,14 @@ function drawConnections() {
       }
     }
   }
+  ctx.globalAlpha = 1;
 }
 
 function drawVortex(v, time) {
   ctx.globalCompositeOperation = 'lighter';
 
-  // core layered glow
-  const layers = [
-    { r: 60, a: 0.10 }, { r: 34, a: 0.22 }, { r: 18, a: 0.5 }
-  ];
-  for (const L of layers) {
-    const g = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, L.r);
-    g.addColorStop(0, `hsla(${v.hue},100%,70%,${L.a})`);
-    g.addColorStop(1, `hsla(${v.hue},100%,50%,0)`);
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(v.x, v.y, L.r, 0, 6.2832); ctx.fill();
-  }
+  // core layered glow (pre-baked per hue)
+  ctx.drawImage(vortexSprite(v.hue), v.x - 60, v.y - 60);
   // white-hot nucleus (pulsing)
   const nuc = v.coreR * (0.55 + 0.12 * Math.sin(time * 3 + v.hue));
   ctx.fillStyle = `hsla(${v.hue},60%,95%,0.95)`;
@@ -1049,6 +1187,24 @@ function frame(now) {
   // ---- webcam gesture control (drives the pointer/vortices) ----
   applyGestureControl(dt);
 
+  // ---- pointer velocity (drives the fluid stir force) ----
+  if (mouse.active && prevMouse.active && dt > 0) {
+    const k = Math.min(1, dt * 14);
+    mouse.vx += ((mouse.x - prevMouse.x) / dt - mouse.vx) * k;
+    mouse.vy += ((mouse.y - prevMouse.y) / dt - mouse.vy) * k;
+    const msp2 = mouse.vx * mouse.vx + mouse.vy * mouse.vy;
+    if (msp2 > MOUSE_MAX_SPEED * MOUSE_MAX_SPEED) {
+      const s = MOUSE_MAX_SPEED / Math.sqrt(msp2);
+      mouse.vx *= s; mouse.vy *= s;
+    }
+  } else {
+    mouse.vx = 0; mouse.vy = 0;
+  }
+  prevMouse.x = mouse.x; prevMouse.y = mouse.y; prevMouse.active = mouse.active;
+
+  // ---- charge well ----
+  if (well.active) well.charge = Math.min(WELL_MAX_CHARGE, well.charge + sdt);
+
   // ---- update ----
   for (const v of vortices) v.armPhase += sdt * 1.8;
   if (sdt > 0) {
@@ -1088,6 +1244,7 @@ function frame(now) {
   drawEnergyArcs(sdt);
   for (const v of vortices) drawVortex(v, time);
   drawShockwaves(sdt);
+  drawWell(time);
   drawSparks();
 
   ctx.restore();
@@ -1108,8 +1265,8 @@ function frame(now) {
     fpsAccum = 0; fpsFrames = 0; hudTimer = 0;
     fpsEl.textContent = 'FPS: ' + fpsShown;
     pcEl.textContent = 'PARTICLES: ' + particles.length;
-    modeEl.textContent = 'MODE: ' + (mouse.shift ? 'REPULSE' : 'ATTRACT');
-    modeEl.style.color = mouse.shift ? '#ff8f7f' : '#7fd4ff';
+    modeEl.textContent = 'MODE: ' + (well.active ? 'SINGULARITY' : mouse.shift ? 'REPULSE' : 'ATTRACT');
+    modeEl.style.color = well.active ? '#d0a4ff' : mouse.shift ? '#ff8f7f' : '#7fd4ff';
     if (gesture.enabled && gesture.tracking) {
       setGestureHud('✋ ' + gesture.name,
         gesture.fist ? '#ff8f7f' : gesture.pinch ? '#ffd27f' : '#a4ffd0');
@@ -1140,6 +1297,7 @@ function loadServerConfig() {
 
 // ============================== BOOT ==============================
 window.addEventListener('resize', resize);
+rebuildSprites();
 resize();
 resetVortices();
 adjustPopulation();
