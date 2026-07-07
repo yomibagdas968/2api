@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Particle Exchange — Dual Vortex Visualization</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- HUD: FPS + particle count -->
+  <div id="hud" class="panel">
+    <div class="hud-row"><span class="hud-label">FPS</span><span id="hud-fps" class="hud-value">--</span></div>
+    <div class="hud-row"><span class="hud-label">PARTICLES</span><span id="hud-particles" class="hud-value">--</span></div>
+  </div>
+
+  <!-- Real-time server stats panel (via WebSocket) -->
+  <div id="stats-panel" class="panel">
+    <div class="panel-title">
+      SERVER LINK
+      <span id="ws-indicator" class="ws-dot"></span>
+    </div>
+    <div class="stat-row"><span>Active particles</span><span id="stat-active">--</span></div>
+    <div class="stat-row"><span>Server FPS</span><span id="stat-fps">--</span></div>
+    <div class="stat-row"><span>Connections</span><span id="stat-conn">--</span></div>
+    <div class="stat-row"><span>Uptime</span><span id="stat-uptime">--</span></div>
+    <div class="stat-row"><span>Messages</span><span id="stat-msgs">--</span></div>
+  </div>
+
+  <!-- Controls help -->
+  <div id="help" class="panel">
+    <div class="panel-title">CONTROLS</div>
+    <ul>
+      <li><b>Drag</b> vortex core to move it</li>
+      <li><b>Click</b> vortex to reverse spin (shockwave)</li>
+      <li><b>Scroll</b> to change particle count (200–2000)</li>
+      <li><b>Double-click</b> to reset</li>
+      <li><b>Move mouse</b> to attract particles</li>
+      <li><b>Shift + mouse</b> to repel particles</li>
+    </ul>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
