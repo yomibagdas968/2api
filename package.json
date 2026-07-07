@@ -1,18 +1,14 @@
 {
   "name": "particle-exchange-viz",
-  "version": "1.0.0",
-  "description": "Interactive full-stack particle exchange visualization with dual vortex systems, WebSocket live stats, and canvas bloom effects",
+  "version": "2.0.0",
+  "description": "Interactive particle exchange visualization with multi-vortex systems, webcam gestures, bloom effects, and comet trails",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
   },
-  "keywords": ["particles", "canvas", "websocket", "visualization", "vortex"],
+  "keywords": ["particles", "canvas", "webcam", "gestures", "visualization", "vortex"],
   "license": "MIT",
-  "dependencies": {
-    "express": "^4.19.2",
-    "ws": "^8.17.0"
-  },
   "engines": {
     "node": ">=16.0.0"
   }
