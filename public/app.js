@@ -1,804 +1,652 @@
-/**
- * Particle Exchange — Dual Vortex Canvas Visualization
- * Vanilla JS + Canvas 2D. No build tools.
- */
 (() => {
   'use strict';
 
-  // =========================================================================
-  // Setup
-  // =========================================================================
-  const canvas = document.getElementById('scene');
+  // ---------- Canvas setup ----------
+  const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
 
-  let W = window.innerWidth;
-  let H = window.innerHeight;
-  canvas.width = W;
-  canvas.height = H;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildStars();
+  }
+  window.addEventListener('resize', resize);
 
-  // Offscreen buffer for bloom post-processing (quarter resolution)
-  const bloomCanvas = document.createElement('canvas');
-  const bloomCtx = bloomCanvas.getContext('2d');
-
-  // Pre-rendered nebula + starfield background
-  const bgCanvas = document.createElement('canvas');
-  const bgCtx = bgCanvas.getContext('2d');
-
-  // =========================================================================
-  // Config / state
-  // =========================================================================
+  // ---------- Config ----------
   const config = {
-    count: 1000,
-    minCount: 200,
-    maxCount: 2000,
+    count: 1500,
     speed: 1.0,
-    trailLength: 8,
-    connectionDistance: 90,
-    bloom: true
+    trail: 0.12,
+    vortexStrength: 1.0
   };
 
-  // Color palette: blue -> cyan -> orange -> purple (hue keyframes)
-  const HUE_STOPS = [220, 185, 30, 280, 220];
+  const COLOR_MODES = ['rainbow', 'monochrome', 'neon', 'fire', 'ice'];
+  let colorMode = 0;
+  let heatmapOn = false;
+  let demoOn = false;
+  let demoTime = 0;
 
+  // Performance auto-scaling
+  let perfScale = 1.0;
+  let lowFpsFrames = 0;
+  let highFpsFrames = 0;
+
+  // ---------- Stars (3-layer parallax) ----------
+  const starLayers = [[], [], []];
+  function buildStars() {
+    const densities = [90, 60, 35];
+    for (let l = 0; l < 3; l++) {
+      starLayers[l].length = 0;
+      const n = Math.floor((W * H) / 1e6 * densities[l]) + densities[l];
+      for (let i = 0; i < n; i++) {
+        starLayers[l].push({
+          x: Math.random() * W,
+          y: Math.random() * H,
+          r: 0.4 + Math.random() * (0.5 + l * 0.6),
+          tw: Math.random() * Math.PI * 2
+        });
+      }
+    }
+  }
+
+  // ---------- Vortices ----------
   const vortices = [
-    makeVortex(0, 0.3, 0.5, 1),
-    makeVortex(1, 0.7, 0.5, -1)
+    { x: 0, y: 0, dir: 1, phase: 0, radius: 26, drag: false },
+    { x: 0, y: 0, dir: -1, phase: Math.PI, radius: 26, drag: false }
   ];
+  function placeVortices() {
+    vortices[0].x = W * 0.3; vortices[0].y = H * 0.5;
+    vortices[1].x = W * 0.7; vortices[1].y = H * 0.5;
+  }
 
-  function makeVortex(id, nx, ny, direction) {
+  // ---------- Particles ----------
+  const particles = [];
+  function spawnParticle(x, y, burst) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = burst ? 120 + Math.random() * 260 : Math.random() * 30;
     return {
-      id,
-      x: nx * W,
-      y: ny * H,
-      nx, ny,
-      direction,          // 1 = CCW, -1 = CW
-      strength: 1.0,
-      radius: 22,
-      armAngle: Math.random() * Math.PI * 2,
-      dragging: false
+      x: x !== undefined ? x : Math.random() * W,
+      y: y !== undefined ? y : Math.random() * H,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 6 + Math.random() * 10,
+      maxLife: 0,
+      age: 0,
+      hueSeed: Math.random(),
+      size: 0.8 + Math.random() * 1.8
     };
   }
-
-  let particles = [];
-  const shockwaves = [];
-  const lightningBolts = [];
-  const mouseTrail = [];
-
-  const mouse = { x: W / 2, y: H / 2, active: false, shift: false, down: false };
-  let dragTarget = null;
-  let dragMoved = false;
-
-  // FPS tracking
-  let fps = 0;
-  let frameCount = 0;
-  let lastFpsTime = performance.now();
-  let lastFrame = performance.now();
-
-  // =========================================================================
-  // Glow sprite cache (multi-layer: core + mid + halo) per hue bucket
-  // =========================================================================
-  const SPRITE_SIZE = 48;
-  const HUE_BUCKETS = 64;
-  const spriteCache = [];
-
-  function buildSprites() {
-    for (let i = 0; i < HUE_BUCKETS; i++) {
-      const hue = (i / HUE_BUCKETS) * 360;
-      const c = document.createElement('canvas');
-      c.width = SPRITE_SIZE;
-      c.height = SPRITE_SIZE;
-      const g = c.getContext('2d');
-      const cx = SPRITE_SIZE / 2;
-
-      // Layer 3: halo
-      let grad = g.createRadialGradient(cx, cx, 0, cx, cx, cx);
-      grad.addColorStop(0, `hsla(${hue}, 100%, 65%, 0.28)`);
-      grad.addColorStop(0.5, `hsla(${hue}, 100%, 55%, 0.10)`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      g.fillStyle = grad;
-      g.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
-
-      // Layer 2: mid glow
-      grad = g.createRadialGradient(cx, cx, 0, cx, cx, cx * 0.45);
-      grad.addColorStop(0, `hsla(${hue}, 100%, 70%, 0.85)`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      g.fillStyle = grad;
-      g.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
-
-      // Layer 1: hot core
-      grad = g.createRadialGradient(cx, cx, 0, cx, cx, cx * 0.16);
-      grad.addColorStop(0, 'hsla(0, 0%, 100%, 1)');
-      grad.addColorStop(0.6, `hsla(${hue}, 100%, 85%, 0.9)`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      g.fillStyle = grad;
-      g.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
-
-      spriteCache.push(c);
-    }
-  }
-  buildSprites();
-
-  function hueAt(t) {
-    // t in [0,1) mapped across HUE_STOPS keyframes
-    const seg = t * (HUE_STOPS.length - 1);
-    const i = Math.floor(seg);
-    const f = seg - i;
-    let a = HUE_STOPS[i];
-    let b = HUE_STOPS[Math.min(i + 1, HUE_STOPS.length - 1)];
-    // shortest-path hue interpolation
-    let d = b - a;
-    if (d > 180) d -= 360;
-    if (d < -180) d += 360;
-    return ((a + d * f) + 360) % 360;
+  function initParticle(p) {
+    p.maxLife = p.life;
+    return p;
   }
 
-  // =========================================================================
-  // Particles
-  // =========================================================================
-  function makeParticle() {
-    const x = Math.random() * W;
-    const y = Math.random() * H;
-    return {
-      x, y,
-      vx: (Math.random() - 0.5) * 1.5,
-      vy: (Math.random() - 0.5) * 1.5,
-      size: 0.6 + Math.random() * 1.8,
-      colorPhase: Math.random(),
-      colorSpeed: 0.0004 + Math.random() * 0.0012,
-      trail: []
-    };
+  function targetCount() {
+    return Math.max(300, Math.floor(config.count * perfScale));
   }
 
-  function setParticleCount(n) {
-    n = Math.max(config.minCount, Math.min(config.maxCount, Math.round(n)));
-    config.count = n;
-    while (particles.length < n) particles.push(makeParticle());
-    if (particles.length > n) particles.length = n;
-    pushConfigDebounced();
+  function syncParticleCount() {
+    const t = targetCount();
+    while (particles.length < t) particles.push(initParticle(spawnParticle()));
+    if (particles.length > t) particles.length = t;
   }
 
-  function resetScene() {
-    vortices[0].nx = 0.3; vortices[0].ny = 0.5; vortices[0].direction = 1;
-    vortices[1].nx = 0.7; vortices[1].ny = 0.5; vortices[1].direction = -1;
-    vortices.forEach((v) => { v.x = v.nx * W; v.y = v.ny * H; });
-    particles = [];
-    setParticleCount(1000);
-    shockwaves.length = 0;
-    lightningBolts.length = 0;
-    spawnShockwave(W / 2, H / 2, 200);
-  }
-
-  // =========================================================================
-  // Background: nebula + starfield (pre-rendered)
-  // =========================================================================
-  function renderBackground() {
-    bgCanvas.width = W;
-    bgCanvas.height = H;
-    const g = bgCtx;
-
-    g.fillStyle = '#04040c';
-    g.fillRect(0, 0, W, H);
-
-    // Nebula clouds
-    const clouds = [
-      { x: W * 0.25, y: H * 0.35, r: Math.max(W, H) * 0.45, hue: 225, a: 0.10 },
-      { x: W * 0.75, y: H * 0.6, r: Math.max(W, H) * 0.4, hue: 280, a: 0.09 },
-      { x: W * 0.5, y: H * 0.85, r: Math.max(W, H) * 0.35, hue: 190, a: 0.06 },
-      { x: W * 0.85, y: H * 0.15, r: Math.max(W, H) * 0.3, hue: 25, a: 0.05 }
-    ];
-    clouds.forEach((c) => {
-      const grad = g.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
-      grad.addColorStop(0, `hsla(${c.hue}, 80%, 40%, ${c.a})`);
-      grad.addColorStop(0.6, `hsla(${c.hue}, 80%, 30%, ${c.a * 0.4})`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      g.fillStyle = grad;
-      g.fillRect(0, 0, W, H);
-    });
-
-    // Star field
-    const starCount = Math.floor((W * H) / 3500);
-    for (let i = 0; i < starCount; i++) {
-      const x = Math.random() * W;
-      const y = Math.random() * H;
-      const r = Math.random() * 1.2;
-      const a = 0.15 + Math.random() * 0.65;
-      g.fillStyle = `rgba(255, 255, 255, ${a})`;
-      g.beginPath();
-      g.arc(x, y, r, 0, Math.PI * 2);
-      g.fill();
-      if (Math.random() < 0.06) {
-        // occasional bright star with glow
-        const grad = g.createRadialGradient(x, y, 0, x, y, 6);
-        grad.addColorStop(0, 'rgba(200, 225, 255, 0.5)');
-        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        g.fillStyle = grad;
-        g.fillRect(x - 6, y - 6, 12, 12);
-      }
-    }
-  }
-
-  // =========================================================================
-  // Effects
-  // =========================================================================
-  function spawnShockwave(x, y, maxR = 260) {
-    shockwaves.push({ x, y, r: 4, maxR, alpha: 1 });
-  }
-
-  function spawnLightning() {
-    const [a, b] = vortices;
-    const points = [{ x: a.x, y: a.y }];
-    const segs = 14;
-    const dx = (b.x - a.x) / segs;
-    const dy = (b.y - a.y) / segs;
-    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-    const nx = -(b.y - a.y) / len;
-    const ny = (b.x - a.x) / len;
-    for (let i = 1; i < segs; i++) {
-      const jitter = (Math.random() - 0.5) * len * 0.14 * Math.sin((i / segs) * Math.PI);
-      points.push({
-        x: a.x + dx * i + nx * jitter,
-        y: a.y + dy * i + ny * jitter
-      });
-    }
-    points.push({ x: b.x, y: b.y });
-    lightningBolts.push({ points, life: 1 });
-  }
-
-  // =========================================================================
-  // Physics
-  // =========================================================================
-  function updateParticles(dt) {
-    const speedMul = config.speed * dt * 60;
-
+  // ---------- Spatial hash ----------
+  const CELL = 48;
+  let grid = new Map();
+  function hashKey(cx, cy) { return cx * 100003 + cy; }
+  function rebuildGrid() {
+    grid.clear();
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
+      const cx = Math.floor(p.x / CELL);
+      const cy = Math.floor(p.y / CELL);
+      const k = hashKey(cx, cy);
+      let cell = grid.get(k);
+      if (!cell) { cell = []; grid.set(k, cell); }
+      cell.push(i);
+    }
+  }
+  function cellCount(cx, cy) {
+    const cell = grid.get(hashKey(cx, cy));
+    return cell ? cell.length : 0;
+  }
 
-      // Trail bookkeeping
-      p.trail.push(p.x, p.y);
-      const maxTrail = config.trailLength * 2;
-      if (p.trail.length > maxTrail) p.trail.splice(0, p.trail.length - maxTrail);
+  // ---------- Effects ----------
+  const shockwaves = []; // {x, y, r, maxR, alpha}
+  let shake = 0;
 
-      // Vortex forces: radial pull + tangential swirl
-      for (let v = 0; v < vortices.length; v++) {
-        const vor = vortices[v];
-        let dx = vor.x - p.x;
-        let dy = vor.y - p.y;
-        const distSq = dx * dx + dy * dy;
-        const dist = Math.sqrt(distSq) + 0.001;
+  function addShockwave(x, y) {
+    shockwaves.push({ x, y, r: 6, maxR: Math.max(W, H) * 0.4, alpha: 1 });
+  }
 
-        if (dist < 8000) {
-          const inv = 1 / dist;
-          dx *= inv; dy *= inv;
-          const falloff = Math.min(1, 22000 / (distSq + 4000));
-          const pull = 0.055 * vor.strength * falloff;
-          const swirl = 0.16 * vor.strength * falloff * vor.direction;
-          p.vx += dx * pull + (-dy) * swirl;
-          p.vy += dy * pull + (dx) * swirl;
-
-          // core repulsion so particles orbit instead of collapsing
-          if (dist < 46) {
-            p.vx -= dx * (46 - dist) * 0.02;
-            p.vy -= dy * (46 - dist) * 0.02;
-          }
-        }
+  function explode(x, y) {
+    const n = Math.floor(40 * perfScale) + 20;
+    for (let i = 0; i < n; i++) {
+      const p = initParticle(spawnParticle(x, y, true));
+      p.life = 1.5 + Math.random() * 2;
+      p.maxLife = p.life;
+      particles.push(p);
+    }
+    // push nearby existing particles outward
+    for (const p of particles) {
+      const dx = p.x - x, dy = p.y - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < 200 * 200 && d2 > 1) {
+        const d = Math.sqrt(d2);
+        const f = (1 - d / 200) * 400;
+        p.vx += (dx / d) * f;
+        p.vy += (dy / d) * f;
       }
+    }
+    addShockwave(x, y);
+    shake = Math.min(shake + 10, 22);
+    audioPulse(160, 0.25);
+  }
 
-      // Mouse attraction / repulsion (shift)
-      if (mouse.active) {
-        let mdx = mouse.x - p.x;
-        let mdy = mouse.y - p.y;
-        const mDistSq = mdx * mdx + mdy * mdy;
-        if (mDistSq < 32400 && mDistSq > 1) {
-          const mDist = Math.sqrt(mDistSq);
-          const f = (1 - mDist / 180) * 0.09 * (mouse.shift ? -1.8 : 1);
-          p.vx += (mdx / mDist) * f;
-          p.vy += (mdy / mDist) * f;
-        }
+  // ---------- Audio ----------
+  let audioCtx = null, masterGain = null, osc = null;
+  let audioTime = 0;
+  function initAudio() {
+    if (audioCtx) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0;
+      masterGain.connect(audioCtx.destination);
+      osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = 70;
+      osc.connect(masterGain);
+      osc.start();
+    } catch (e) {
+      audioCtx = null;
+    }
+  }
+  function audioPulse(freq, vol) {
+    if (!audioCtx || !masterGain) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t = audioCtx.currentTime;
+    osc.frequency.cancelScheduledValues(t);
+    osc.frequency.setValueAtTime(freq, t);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq * 0.4), t + 0.3);
+    masterGain.gain.cancelScheduledValues(t);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, t);
+    masterGain.gain.linearRampToValueAtTime(Math.min(vol, 0.3), t + 0.02);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+  }
+  function audioAmbientPulse(dt) {
+    audioTime += dt;
+    if (audioTime > 2.4) {
+      audioTime = 0;
+      audioPulse(60 + 20 * Math.abs(vortices[0].dir + vortices[1].dir), 0.05);
+    }
+  }
+
+  // ---------- Colors ----------
+  function particleColor(p, alpha, speedNorm) {
+    switch (COLOR_MODES[colorMode]) {
+      case 'rainbow': {
+        const h = (p.hueSeed * 360 + performance.now() * 0.02) % 360;
+        return `hsla(${h},95%,62%,${alpha})`;
       }
-
-      // Shockwave push
-      for (let s = 0; s < shockwaves.length; s++) {
-        const sw = shockwaves[s];
-        const sdx = p.x - sw.x;
-        const sdy = p.y - sw.y;
-        const sd = Math.hypot(sdx, sdy);
-        if (Math.abs(sd - sw.r) < 30 && sd > 0.5) {
-          const f = sw.alpha * 1.4;
-          p.vx += (sdx / sd) * f;
-          p.vy += (sdy / sd) * f;
-        }
+      case 'monochrome': {
+        const l = 40 + speedNorm * 55;
+        return `hsla(0,0%,${l}%,${alpha})`;
       }
-
-      // Damping + integrate
-      p.vx *= 0.968;
-      p.vy *= 0.968;
-      p.x += p.vx * speedMul;
-      p.y += p.vy * speedMul;
-
-      // Soft wrap at edges
-      if (p.x < -20) { p.x = W + 20; p.trail.length = 0; }
-      else if (p.x > W + 20) { p.x = -20; p.trail.length = 0; }
-      if (p.y < -20) { p.y = H + 20; p.trail.length = 0; }
-      else if (p.y > H + 20) { p.y = -20; p.trail.length = 0; }
-
-      // Color phase: base drift + speed-driven shift
-      const spd = Math.hypot(p.vx, p.vy);
-      p.colorPhase = (p.colorPhase + p.colorSpeed * dt * 1000 + spd * 0.0006) % 1;
-    }
-  }
-
-  function updateEffects(dt) {
-    // Shockwaves
-    for (let i = shockwaves.length - 1; i >= 0; i--) {
-      const sw = shockwaves[i];
-      sw.r += 420 * dt;
-      sw.alpha = Math.max(0, 1 - sw.r / sw.maxR);
-      if (sw.alpha <= 0) shockwaves.splice(i, 1);
-    }
-
-    // Lightning decay
-    for (let i = lightningBolts.length - 1; i >= 0; i--) {
-      lightningBolts[i].life -= dt * 4;
-      if (lightningBolts[i].life <= 0) lightningBolts.splice(i, 1);
-    }
-    // Random lightning between vortices
-    if (Math.random() < 0.02) spawnLightning();
-
-    // Vortex arm rotation
-    vortices.forEach((v) => { v.armAngle += v.direction * dt * 1.6; });
-
-    // Mouse trail decay
-    for (let i = mouseTrail.length - 1; i >= 0; i--) {
-      mouseTrail[i].life -= dt * 2.2;
-      if (mouseTrail[i].life <= 0) mouseTrail.splice(i, 1);
-    }
-  }
-
-  // =========================================================================
-  // Rendering
-  // =========================================================================
-  const GRID = 96; // spatial hash cell size for connection web
-
-  function drawConnections() {
-    // Spatial hash; sample subset for performance at high counts
-    const cols = Math.ceil(W / GRID);
-    const rows = Math.ceil(H / GRID);
-    const grid = new Map();
-    const step = particles.length > 1200 ? 3 : particles.length > 600 ? 2 : 1;
-
-    for (let i = 0; i < particles.length; i += step) {
-      const p = particles[i];
-      const key = Math.floor(p.x / GRID) + Math.floor(p.y / GRID) * cols;
-      let cell = grid.get(key);
-      if (!cell) grid.set(key, (cell = []));
-      cell.push(p);
-    }
-
-    const maxDist = config.connectionDistance;
-    const maxDistSq = maxDist * maxDist;
-    ctx.lineWidth = 0.6;
-
-    grid.forEach((cell, key) => {
-      const cx = key % cols;
-      const cy = Math.floor(key / cols);
-      for (let a = 0; a < cell.length; a++) {
-        const p = cell[a];
-        // same cell + right/down neighbors (avoid double checks)
-        for (let ox = 0; ox <= 1; ox++) {
-          for (let oy = (ox === 0 ? 0 : -1); oy <= 1; oy++) {
-            const nKey = (cx + ox) + (cy + oy) * cols;
-            if (cx + ox >= cols || cy + oy < 0 || cy + oy >= rows) continue;
-            const nCell = grid.get(nKey);
-            if (!nCell) continue;
-            const start = (nKey === key) ? a + 1 : 0;
-            for (let b = start; b < nCell.length; b++) {
-              const q = nCell[b];
-              const dx = p.x - q.x;
-              const dy = p.y - q.y;
-              const dSq = dx * dx + dy * dy;
-              if (dSq < maxDistSq) {
-                const alpha = (1 - dSq / maxDistSq) * 0.16;
-                const hue = hueAt(p.colorPhase);
-                ctx.strokeStyle = `hsla(${hue}, 90%, 65%, ${alpha})`;
-                ctx.beginPath();
-                ctx.moveTo(p.x, p.y);
-                ctx.lineTo(q.x, q.y);
-                ctx.stroke();
-              }
-            }
-          }
-        }
+      case 'neon': {
+        const h = p.hueSeed < 0.5 ? 175 + p.hueSeed * 30 : 300 + (p.hueSeed - 0.5) * 40;
+        return `hsla(${h},100%,${55 + speedNorm * 25}%,${alpha})`;
       }
-    });
-  }
-
-  function drawParticles() {
-    ctx.globalCompositeOperation = 'lighter';
-
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-      const hue = hueAt(p.colorPhase);
-
-      // Trail with gradient fade
-      const t = p.trail;
-      if (t.length >= 4) {
-        const n = t.length / 2;
-        ctx.lineCap = 'round';
-        for (let j = 0; j < n - 1; j++) {
-          const alpha = (j / n) * 0.35;
-          if (alpha < 0.02) continue;
-          ctx.strokeStyle = `hsla(${hue}, 95%, 60%, ${alpha})`;
-          ctx.lineWidth = p.size * (j / n) * 1.4;
-          ctx.beginPath();
-          ctx.moveTo(t[j * 2], t[j * 2 + 1]);
-          ctx.lineTo(t[j * 2 + 2], t[j * 2 + 3]);
-          ctx.stroke();
-        }
+      case 'fire': {
+        const h = 5 + speedNorm * 50;
+        return `hsla(${h},100%,${45 + speedNorm * 30}%,${alpha})`;
       }
-
-      // Multi-layer glow sprite (core + mid + halo baked in)
-      const sprite = spriteCache[Math.floor((hue / 360) * HUE_BUCKETS) % HUE_BUCKETS];
-      const s = SPRITE_SIZE * p.size * 0.4;
-      ctx.drawImage(sprite, p.x - s / 2, p.y - s / 2, s, s);
-    }
-
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function drawVortices() {
-    ctx.globalCompositeOperation = 'lighter';
-
-    vortices.forEach((v) => {
-      const hue = v.direction === 1 ? 190 : 285;
-
-      // Rotating spiral arms
-      const arms = 3;
-      ctx.lineWidth = 1.6;
-      for (let a = 0; a < arms; a++) {
-        const base = v.armAngle + (a / arms) * Math.PI * 2;
-        ctx.strokeStyle = `hsla(${hue}, 100%, 65%, 0.5)`;
-        ctx.beginPath();
-        for (let s = 0; s <= 40; s++) {
-          const tt = s / 40;
-          const ang = base + tt * 2.6 * v.direction;
-          const r = 10 + tt * 90;
-          const x = v.x + Math.cos(ang) * r;
-          const y = v.y + Math.sin(ang) * r;
-          if (s === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
+      case 'ice': {
+        const h = 190 + p.hueSeed * 50;
+        return `hsla(${h},90%,${60 + speedNorm * 25}%,${alpha})`;
       }
-
-      // Core glow layers
-      let grad = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, 70);
-      grad.addColorStop(0, `hsla(${hue}, 100%, 70%, 0.55)`);
-      grad.addColorStop(0.4, `hsla(${hue}, 100%, 55%, 0.18)`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(v.x, v.y, 70, 0, Math.PI * 2);
-      ctx.fill();
-
-      grad = ctx.createRadialGradient(v.x, v.y, 0, v.x, v.y, v.radius);
-      grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-      grad.addColorStop(0.5, `hsla(${hue}, 100%, 80%, 0.9)`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(v.x, v.y, v.radius, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function drawLightning() {
-    if (!lightningBolts.length) return;
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'round';
-    lightningBolts.forEach((bolt) => {
-      const a = Math.max(0, bolt.life);
-      // outer glow pass
-      ctx.strokeStyle = `hsla(265, 100%, 70%, ${a * 0.25})`;
-      ctx.lineWidth = 6;
-      strokePath(bolt.points);
-      // hot core pass
-      ctx.strokeStyle = `hsla(200, 100%, 90%, ${a * 0.9})`;
-      ctx.lineWidth = 1.6;
-      strokePath(bolt.points);
-    });
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function strokePath(points) {
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-    ctx.stroke();
-  }
-
-  function drawShockwaves() {
-    ctx.globalCompositeOperation = 'lighter';
-    shockwaves.forEach((sw) => {
-      ctx.strokeStyle = `hsla(35, 100%, 65%, ${sw.alpha * 0.8})`;
-      ctx.lineWidth = 3 * sw.alpha + 0.5;
-      ctx.beginPath();
-      ctx.arc(sw.x, sw.y, sw.r, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = `hsla(190, 100%, 75%, ${sw.alpha * 0.4})`;
-      ctx.lineWidth = 8 * sw.alpha + 1;
-      ctx.beginPath();
-      ctx.arc(sw.x, sw.y, sw.r * 0.92, 0, Math.PI * 2);
-      ctx.stroke();
-    });
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function drawMouseTrail() {
-    if (!mouseTrail.length) return;
-    ctx.globalCompositeOperation = 'lighter';
-    mouseTrail.forEach((pt) => {
-      const a = Math.max(0, pt.life);
-      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, 18 * a + 4);
-      grad.addColorStop(0, `hsla(${pt.hue}, 100%, 70%, ${a * 0.4})`);
-      grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 18 * a + 4, 0, Math.PI * 2);
-      ctx.fill();
-    });
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  function applyBloom() {
-    if (!config.bloom) return;
-    const bw = Math.max(1, W >> 2);
-    const bh = Math.max(1, H >> 2);
-    if (bloomCanvas.width !== bw) { bloomCanvas.width = bw; bloomCanvas.height = bh; }
-
-    bloomCtx.clearRect(0, 0, bw, bh);
-    bloomCtx.drawImage(canvas, 0, 0, bw, bh);
-
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.5;
-    if ('filter' in ctx) ctx.filter = 'blur(6px)';
-    ctx.drawImage(bloomCanvas, 0, 0, bw, bh, 0, 0, W, H);
-    ctx.restore();
-    if ('filter' in ctx) ctx.filter = 'none';
-    ctx.globalAlpha = 1;
-  }
-
-  // =========================================================================
-  // Main loop
-  // =========================================================================
-  function frame(now) {
-    const dt = Math.min(0.05, (now - lastFrame) / 1000);
-    lastFrame = now;
-
-    // FPS
-    frameCount++;
-    if (now - lastFpsTime >= 500) {
-      fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
-      frameCount = 0;
-      lastFpsTime = now;
-      hudFps.textContent = fps;
-      hudParticles.textContent = particles.length;
     }
-
-    updateParticles(dt);
-    updateEffects(dt);
-
-    // Background (pre-rendered nebula/stars) with slight afterglow fade
-    ctx.globalAlpha = 1;
-    ctx.drawImage(bgCanvas, 0, 0);
-
-    drawConnections();
-    drawParticles();
-    drawLightning();
-    drawVortices();
-    drawShockwaves();
-    drawMouseTrail();
-    applyBloom();
-
-    requestAnimationFrame(frame);
+    return `rgba(255,255,255,${alpha})`;
   }
 
-  // =========================================================================
-  // Input handling
-  // =========================================================================
-  function vortexAt(x, y) {
-    return vortices.find((v) => Math.hypot(v.x - x, v.y - y) < 40) || null;
-  }
+  // ---------- Input ----------
+  const mouse = { x: -9999, y: -9999, down: false, shift: false, dragTarget: null, downX: 0, downY: 0, moved: false };
 
   canvas.addEventListener('mousedown', (e) => {
+    initAudio();
     mouse.down = true;
-    dragMoved = false;
-    dragTarget = vortexAt(e.clientX, e.clientY);
-    if (dragTarget) dragTarget.dragging = true;
+    mouse.moved = false;
+    mouse.downX = e.clientX;
+    mouse.downY = e.clientY;
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    for (const v of vortices) {
+      const dx = e.clientX - v.x, dy = e.clientY - v.y;
+      if (dx * dx + dy * dy < (v.radius + 18) * (v.radius + 18)) {
+        mouse.dragTarget = v;
+        v.drag = true;
+        break;
+      }
+    }
   });
 
   window.addEventListener('mousemove', (e) => {
     mouse.x = e.clientX;
     mouse.y = e.clientY;
-    mouse.active = true;
-    mouse.shift = e.shiftKey;
-
-    // Mouse trail
-    mouseTrail.push({
-      x: e.clientX, y: e.clientY, life: 1,
-      hue: mouse.shift ? 15 : 195
-    });
-    if (mouseTrail.length > 40) mouseTrail.shift();
-
-    if (dragTarget) {
-      dragMoved = true;
-      dragTarget.x = e.clientX;
-      dragTarget.y = e.clientY;
-      dragTarget.nx = e.clientX / W;
-      dragTarget.ny = e.clientY / H;
-      pushConfigDebounced();
+    if (mouse.down) {
+      const dx = e.clientX - mouse.downX, dy = e.clientY - mouse.downY;
+      if (dx * dx + dy * dy > 36) mouse.moved = true;
+      if (mouse.dragTarget) {
+        mouse.dragTarget.x = e.clientX;
+        mouse.dragTarget.y = e.clientY;
+      }
     }
   });
 
   window.addEventListener('mouseup', (e) => {
+    if (!mouse.down) return;
     mouse.down = false;
-    if (dragTarget) {
-      if (!dragMoved) {
-        // Click (no drag): reverse rotation + shockwave
-        dragTarget.direction *= -1;
-        spawnShockwave(dragTarget.x, dragTarget.y, 320);
-        spawnLightning();
-        pushConfigDebounced();
+    const target = mouse.dragTarget;
+    mouse.dragTarget = null;
+    if (target) {
+      target.drag = false;
+      if (!mouse.moved) {
+        // click on vortex: reverse spin + shockwave
+        target.dir *= -1;
+        addShockwave(target.x, target.y);
+        shake = Math.min(shake + 14, 24);
+        audioPulse(220, 0.22);
       }
-      dragTarget.dragging = false;
-      dragTarget = null;
+      return;
+    }
+    if (!mouse.moved && e.target === canvas) {
+      explode(e.clientX, e.clientY);
     }
   });
 
-  window.addEventListener('mouseleave', () => { mouse.active = false; });
-
-  canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -60 : 60;
-    setParticleCount(config.count + delta);
-  }, { passive: false });
-
-  canvas.addEventListener('dblclick', (e) => {
-    e.preventDefault();
-    resetScene();
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Shift') mouse.shift = true;
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    const k = e.key.toLowerCase();
+    if (k >= '1' && k <= '5') {
+      colorMode = parseInt(k, 10) - 1;
+      document.getElementById('hud-mode').textContent = COLOR_MODES[colorMode];
+    } else if (k === 's') {
+      document.getElementById('settings-panel').classList.toggle('hidden');
+    } else if (k === 'p') {
+      screenshot();
+    } else if (k === 'd') {
+      demoOn = !demoOn;
+      document.getElementById('hud-demo').textContent = demoOn ? 'on' : 'off';
+    } else if (k === 'h') {
+      heatmapOn = !heatmapOn;
+    }
+    initAudio();
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Shift') mouse.shift = false;
   });
 
-  window.addEventListener('keydown', (e) => { if (e.key === 'Shift') mouse.shift = true; });
-  window.addEventListener('keyup', (e) => { if (e.key === 'Shift') mouse.shift = false; });
-
-  window.addEventListener('resize', () => {
-    W = window.innerWidth;
-    H = window.innerHeight;
-    canvas.width = W;
-    canvas.height = H;
-    vortices.forEach((v) => { v.x = v.nx * W; v.y = v.ny * H; });
-    renderBackground();
-  });
-
-  // =========================================================================
-  // HUD elements
-  // =========================================================================
-  const hudFps = document.getElementById('hud-fps');
-  const hudParticles = document.getElementById('hud-particles');
-  const statActive = document.getElementById('stat-active');
-  const statFps = document.getElementById('stat-fps');
-  const statConn = document.getElementById('stat-conn');
-  const statUptime = document.getElementById('stat-uptime');
-  const statMsgs = document.getElementById('stat-msgs');
-  const wsIndicator = document.getElementById('ws-indicator');
-
-  function formatUptime(sec) {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  function screenshot() {
+    try {
+      const a = document.createElement('a');
+      a.download = 'particle-exchange-' + Date.now() + '.png';
+      a.href = canvas.toDataURL('image/png');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.warn('Screenshot failed:', err);
+    }
   }
 
-  // =========================================================================
-  // Server communication
-  // =========================================================================
+  // ---------- Settings panel ----------
+  function bindSlider(id, valId, key, fmt) {
+    const el = document.getElementById(id);
+    const val = document.getElementById(valId);
+    el.value = config[key];
+    val.textContent = fmt(config[key]);
+    el.addEventListener('input', () => {
+      config[key] = parseFloat(el.value);
+      val.textContent = fmt(config[key]);
+      if (key === 'count') syncParticleCount();
+    });
+  }
+  bindSlider('set-count', 'val-count', 'count', v => String(Math.round(v)));
+  bindSlider('set-speed', 'val-speed', 'speed', v => v.toFixed(1));
+  bindSlider('set-trail', 'val-trail', 'trail', v => v.toFixed(2));
+  bindSlider('set-vortex', 'val-vortex', 'vortexStrength', v => v.toFixed(1));
+
+  // ---------- WebSocket stats ----------
   let ws = null;
-  let wsReconnectTimer = null;
-
-  function connectWebSocket() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-
+  let wsRetry = 1000;
+  const wsStatus = document.getElementById('ws-status');
+  function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    try {
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
+    } catch {
+      wsStatus.textContent = 'offline';
+      return;
+    }
     ws.onopen = () => {
-      wsIndicator.classList.add('connected');
+      wsStatus.textContent = 'online';
+      wsRetry = 1000;
     };
-
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg.type === 'stats' && msg.payload) {
-          statActive.textContent = msg.payload.activeParticles;
-          statFps.textContent = msg.payload.fps;
-          statConn.textContent = msg.payload.connections;
-          statUptime.textContent = formatUptime(msg.payload.uptimeSeconds);
-          statMsgs.textContent = msg.payload.totalMessages;
-        }
-      } catch (_) { /* ignore */ }
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg && msg.stats) {
+        document.getElementById('ws-clients').textContent = msg.stats.clients;
+        document.getElementById('ws-fps').textContent = msg.stats.avgFps;
+        document.getElementById('ws-particles').textContent = msg.stats.totalParticles;
+      }
     };
-
     ws.onclose = () => {
-      wsIndicator.classList.remove('connected');
-      clearTimeout(wsReconnectTimer);
-      wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+      wsStatus.textContent = 'offline';
+      ws = null;
+      setTimeout(connectWS, wsRetry);
+      wsRetry = Math.min(wsRetry * 2, 15000);
     };
-
-    ws.onerror = () => ws.close();
+    ws.onerror = () => { if (ws) ws.close(); };
   }
+  connectWS();
 
-  // Report local fps + particle count to the server every second
   setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'client-stats',
-        payload: { fps, activeParticles: particles.length }
-      }));
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'stats', fps: Math.round(fps), count: particles.length }));
     }
   }, 1000);
 
-  // Debounced POST of config changes back to the server
-  let configTimer = null;
-  function pushConfigDebounced() {
-    clearTimeout(configTimer);
-    configTimer = setTimeout(() => {
-      fetch('/api/particles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          count: config.count,
-          speed: config.speed,
-          vortices: vortices.map((v) => ({
-            id: v.id, x: v.nx, y: v.ny, direction: v.direction, strength: v.strength
-          }))
-        })
-      }).catch(() => { /* server optional for rendering */ });
-    }, 300);
-  }
+  // Occasionally post a snapshot to the REST API
+  setInterval(() => {
+    fetch('/api/particles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: particles.length, mode: COLOR_MODES[colorMode] })
+    }).catch(() => {});
+  }, 10000);
 
-  // Load initial config from server
-  async function loadConfig() {
-    try {
-      const res = await fetch('/api/particles');
-      const cfg = await res.json();
-      if (typeof cfg.count === 'number') config.count = cfg.count;
-      if (typeof cfg.speed === 'number') config.speed = cfg.speed;
-      if (typeof cfg.trailLength === 'number') config.trailLength = cfg.trailLength;
-      if (typeof cfg.connectionDistance === 'number') config.connectionDistance = cfg.connectionDistance;
-      if (typeof cfg.bloom === 'boolean') config.bloom = cfg.bloom;
-      if (Array.isArray(cfg.vortices)) {
-        cfg.vortices.forEach((v) => {
-          const target = vortices.find((t) => t.id === v.id);
-          if (target) {
-            target.nx = v.x; target.ny = v.y;
-            target.x = v.x * W; target.y = v.y * H;
-            target.direction = v.direction;
-            target.strength = v.strength;
-          }
-        });
-      }
-    } catch (_) {
-      /* fall back to local defaults */
+  // ---------- Demo mode ----------
+  function updateDemo(dt) {
+    demoTime += dt;
+    const cx = W / 2, cy = H / 2;
+    vortices[0].x = cx + Math.cos(demoTime * 0.4) * W * 0.25;
+    vortices[0].y = cy + Math.sin(demoTime * 0.6) * H * 0.28;
+    vortices[1].x = cx + Math.cos(demoTime * 0.5 + Math.PI) * W * 0.25;
+    vortices[1].y = cy + Math.sin(demoTime * 0.35 + Math.PI) * H * 0.28;
+    if (Math.floor(demoTime) % 7 === 0 && demoTime % 1 < dt) {
+      explode(Math.random() * W, Math.random() * H);
     }
-    setParticleCount(config.count);
+    if (Math.floor(demoTime) % 11 === 0 && demoTime % 1 < dt) {
+      const v = vortices[Math.floor(Math.random() * 2)];
+      v.dir *= -1;
+      addShockwave(v.x, v.y);
+    }
   }
 
-  // =========================================================================
-  // Boot
-  // =========================================================================
-  renderBackground();
-  loadConfig().then(() => {
-    connectWebSocket();
+  // ---------- Physics ----------
+  function updateParticles(dt) {
+    const vs = config.vortexStrength;
+    const t = performance.now() * 0.001;
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.age += dt;
+      p.life -= dt;
+
+      if (p.life <= 0) {
+        if (particles.length > targetCount()) {
+          particles.splice(i, 1);
+          continue;
+        }
+        const np = initParticle(spawnParticle());
+        np.age = 0;
+        particles[i] = np;
+        continue;
+      }
+
+      // Vortex forces with spiral arm modulation
+      for (const v of vortices) {
+        const dx = p.x - v.x, dy = p.y - v.y;
+        const d2 = dx * dx + dy * dy + 100;
+        const d = Math.sqrt(d2);
+        if (d > 900) continue;
+        const ang = Math.atan2(dy, dx);
+        const armMod = 0.6 + 0.4 * Math.cos(3 * ang - v.dir * t * 2 - Math.log(d + 1) * 2);
+        const f = (26000 / d2) * vs * armMod;
+        // tangential (spin)
+        p.vx += (-dy / d) * f * v.dir * 60 * dt;
+        p.vy += (dx / d) * f * v.dir * 60 * dt;
+        // inward pull
+        p.vx += (-dx / d) * f * 22 * dt;
+        p.vy += (-dy / d) * f * 22 * dt;
+      }
+
+      // Mouse attract / repel
+      if (mouse.down && !mouse.dragTarget) {
+        const dx = mouse.x - p.x, dy = mouse.y - p.y;
+        const d2 = dx * dx + dy * dy + 400;
+        if (d2 < 350 * 350) {
+          const d = Math.sqrt(d2);
+          const sign = mouse.shift ? -1 : 1;
+          const f = (60000 / d2) * sign;
+          p.vx += (dx / d) * f * 60 * dt;
+          p.vy += (dy / d) * f * 60 * dt;
+        }
+      }
+
+      // Local separation via spatial hash (avoid clumping)
+      const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+      const local = cellCount(cx, cy);
+      if (local > 14) {
+        const jitter = (local - 14) * 2;
+        p.vx += (Math.random() - 0.5) * jitter;
+        p.vy += (Math.random() - 0.5) * jitter;
+      }
+
+      // Shockwave push
+      for (const s of shockwaves) {
+        const dx = p.x - s.x, dy = p.y - s.y;
+        const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
+        const band = Math.abs(d - s.r);
+        if (band < 40) {
+          const f = (1 - band / 40) * 500 * s.alpha;
+          p.vx += (dx / d) * f * dt * 10;
+          p.vy += (dy / d) * f * dt * 10;
+        }
+      }
+
+      // Integrate
+      const drag = Math.pow(0.985, dt * 60);
+      p.vx *= drag;
+      p.vy *= drag;
+      p.x += p.vx * dt * config.speed;
+      p.y += p.vy * dt * config.speed;
+
+      // Wrap edges
+      if (p.x < -10) p.x += W + 20;
+      else if (p.x > W + 10) p.x -= W + 20;
+      if (p.y < -10) p.y += H + 20;
+      else if (p.y > H + 10) p.y -= H + 20;
+    }
+  }
+
+  // ---------- Rendering ----------
+  function drawStars(t) {
+    const px = (mouse.x >= 0 ? mouse.x - W / 2 : 0);
+    const py = (mouse.y >= 0 ? mouse.y - H / 2 : 0);
+    for (let l = 0; l < 3; l++) {
+      const depth = (l + 1) * 0.006;
+      const ox = -px * depth, oy = -py * depth;
+      for (const s of starLayers[l]) {
+        const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * (0.5 + l * 0.3) + s.tw));
+        ctx.globalAlpha = tw * (0.25 + l * 0.25);
+        ctx.fillStyle = l === 2 ? '#cfefff' : '#8fb8d8';
+        ctx.beginPath();
+        ctx.arc(s.x + ox, s.y + oy, s.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHeatmap() {
+    const cw = Math.ceil(W / CELL), ch = Math.ceil(H / CELL);
+    let max = 1;
+    for (const [, cell] of grid) max = Math.max(max, cell.length);
+    for (let cy = 0; cy < ch; cy++) {
+      for (let cx = 0; cx < cw; cx++) {
+        const n = cellCount(cx, cy);
+        if (!n) continue;
+        const v = n / max;
+        ctx.fillStyle = `hsla(${260 - v * 260},100%,50%,${Math.min(0.35, v * 0.45)})`;
+        ctx.fillRect(cx * CELL, cy * CELL, CELL, CELL);
+      }
+    }
+  }
+
+  function drawVortex(v, t) {
+    v.phase += 0.02 * v.dir;
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    // spiral arms
+    ctx.lineWidth = 2;
+    for (let arm = 0; arm < 3; arm++) {
+      ctx.beginPath();
+      const base = v.phase + (arm * Math.PI * 2) / 3;
+      for (let s = 0; s < 40; s++) {
+        const r = 6 + s * 3.2;
+        const a = base + v.dir * s * 0.18;
+        const x = Math.cos(a) * r, y = Math.sin(a) * r;
+        if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = `hsla(${(t * 40 + arm * 60) % 360},100%,65%,0.35)`;
+      ctx.stroke();
+    }
+    // core
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, v.radius);
+    g.addColorStop(0, 'rgba(255,255,255,0.95)');
+    g.addColorStop(0.4, v.dir > 0 ? 'rgba(0,229,255,0.6)' : 'rgba(255,46,196,0.6)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, v.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function render(t, dt) {
+    // Trail fade
+    ctx.fillStyle = `rgba(3,3,8,${config.trail})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // Screen shake
+    ctx.save();
+    if (shake > 0.1) {
+      ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+      shake *= Math.pow(0.88, dt * 60);
+    } else {
+      shake = 0;
+    }
+
+    drawStars(t);
+    if (heatmapOn) drawHeatmap();
+
+    // Particles
+    for (const p of particles) {
+      const birth = Math.min(1, p.age / 0.6);
+      const death = Math.min(1, p.life / 0.8);
+      const alpha = Math.max(0, Math.min(birth, death)) * 0.9;
+      if (alpha <= 0.01) continue;
+      const sp = Math.min(1, Math.sqrt(p.vx * p.vx + p.vy * p.vy) / 300);
+      ctx.fillStyle = particleColor(p, alpha, sp);
+      const size = p.size * (0.6 + birth * 0.4) * (0.5 + death * 0.5);
+      ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    }
+
+    // Shockwaves
+    for (let i = shockwaves.length - 1; i >= 0; i--) {
+      const s = shockwaves[i];
+      s.r += 600 * dt;
+      s.alpha = 1 - s.r / s.maxR;
+      if (s.alpha <= 0) { shockwaves.splice(i, 1); continue; }
+      ctx.strokeStyle = `rgba(0,229,255,${s.alpha * 0.8})`;
+      ctx.lineWidth = 3 * s.alpha + 1;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    for (const v of vortices) drawVortex(v, t);
+
+    ctx.restore();
+  }
+
+  // ---------- FPS + perf scaling ----------
+  let fps = 60;
+  let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
+  const hudFps = document.getElementById('hud-fps');
+  const hudCount = document.getElementById('hud-count');
+
+  function updatePerf(dt) {
+    fpsAccum += 1 / Math.max(dt, 0.0001);
+    fpsFrames++;
+    fpsTimer += dt;
+    if (fpsTimer >= 0.5) {
+      fps = fpsAccum / fpsFrames;
+      fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
+      hudFps.textContent = Math.round(fps);
+      hudCount.textContent = particles.length;
+
+      if (fps < 45) { lowFpsFrames++; highFpsFrames = 0; }
+      else if (fps > 57) { highFpsFrames++; lowFpsFrames = 0; }
+      else { lowFpsFrames = 0; highFpsFrames = 0; }
+
+      if (lowFpsFrames >= 4 && perfScale > 0.3) {
+        perfScale = Math.max(0.3, perfScale - 0.1);
+        lowFpsFrames = 0;
+        syncParticleCount();
+      } else if (highFpsFrames >= 8 && perfScale < 1) {
+        perfScale = Math.min(1, perfScale + 0.05);
+        highFpsFrames = 0;
+        syncParticleCount();
+      }
+    }
+  }
+
+  // ---------- Main loop ----------
+  let lastT = performance.now();
+  function frame(now) {
+    let dt = (now - lastT) / 1000;
+    lastT = now;
+    if (dt > 0.1) dt = 0.1; // clamp on tab-switch
+    const t = now * 0.001;
+
+    if (demoOn) updateDemo(dt);
+    syncParticleCount();
+    rebuildGrid();
+    updateParticles(dt);
+    render(t, dt);
+    updatePerf(dt);
+    audioAmbientPulse(dt);
+
     requestAnimationFrame(frame);
-  });
+  }
+
+  // ---------- Boot ----------
+  resize();
+  placeVortices();
+  syncParticleCount();
+  ctx.fillStyle = '#030308';
+  ctx.fillRect(0, 0, W, H);
+  requestAnimationFrame(frame);
 })();
