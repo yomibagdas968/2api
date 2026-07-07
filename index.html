@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Exchange — Spectral Vortex</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="flash"></div>
+<div id="banner"></div>
+<div id="hud">
+  <div class="big">◈ PARTICLE EXCHANGE</div>
+  <div id="fps">FPS: --</div>
+  <div id="pcount">PARTICLES: --</div>
+  <div id="mode">MODE: ATTRACT</div>
+  <div id="theme">THEME: SPECTRAL</div>
+  <div id="gesture">GESTURE: OFF (press G)</div>
+  <div id="state"></div>
+</div>
+<div id="help">
+  drag cores &nbsp;·&nbsp; click core = reverse (+shockwave) &nbsp;·&nbsp; right-click = supernova &nbsp;·&nbsp; scroll = particle count (200–2000)<br>
+  V = add vortex &nbsp;·&nbsp; X = remove vortex &nbsp;·&nbsp; 1–4 = color theme &nbsp;·&nbsp; SPACE = slow-mo &nbsp;·&nbsp; P = pause<br>
+  double-click = reset &nbsp;·&nbsp; move mouse = attract &nbsp;·&nbsp; hold SHIFT = repulse<br>
+  G = webcam gestures &nbsp;·&nbsp; ☝ point = attract &nbsp;·&nbsp; ✊ fist = repulse &nbsp;·&nbsp; 🤏 pinch = grab core &nbsp;·&nbsp; ✌ = supernova
+</div>
+<video id="cam" playsinline muted></video>
+<script src="app.js"></script>
+</body>
+</html>

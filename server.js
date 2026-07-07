@@ -1,115 +1,138 @@
-const express = require('express');
+'use strict';
+
+/**
+ * Particle Exchange — zero-dependency Node.js server.
+ *
+ * - Serves static files from this directory (index route -> index.html)
+ * - GET /api/config  : initial client configuration (particle count, theme)
+ * - GET /api/health  : liveness probe
+ *
+ * Webcam gestures: the client loads MediaPipe Hands from the jsDelivr CDN.
+ * getUserMedia requires a secure context, so open the app via
+ * http://localhost:<port> (secure by definition) or behind HTTPS.
+ *
+ * Usage:  node server.js            (defaults to port 3000)
+ *         PORT=8080 node server.js
+ */
+
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
-const { WebSocketServer } = require('ws');
 
-const PORT = process.env.PORT || 3000;
-const app = express();
-const server = http.createServer(app);
+const PORT = Number.parseInt(process.env.PORT, 10) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const ROOT = __dirname;
+const INDEX_FILE = 'index.html';
 
-app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'text/javascript; charset=utf-8',
+  '.mjs':  'text/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.ico':  'image/x-icon',
+  '.txt':  'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+  // MediaPipe assets (only needed if you self-host them instead of the CDN)
+  '.wasm':   'application/wasm',
+  '.data':   'application/octet-stream',
+  '.tflite': 'application/octet-stream',
+  '.binarypb':'application/octet-stream'
+};
 
-// In-memory particle snapshot store
-let particleSnapshots = [];
-const MAX_SNAPSHOTS = 100;
-const startTime = Date.now();
+// Initial config handed to the client on boot (client clamps + falls back safely).
+const CLIENT_CONFIG = {
+  particles: Number.parseInt(process.env.PARTICLES, 10) || 1200,
+  theme: Number.parseInt(process.env.THEME, 10) || 0
+};
 
-// Per-client stats reported over WebSocket
-const clientStats = new Map(); // ws -> { fps, count, ts }
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.get('/api/particles', (req, res) => {
-  res.json({
-    ok: true,
-    snapshots: particleSnapshots.slice(-20),
-    total: particleSnapshots.length
+function sendJSON(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store'
   });
-});
-
-app.post('/api/particles', (req, res) => {
-  const body = req.body || {};
-  const snapshot = {
-    id: particleSnapshots.length + 1,
-    count: typeof body.count === 'number' ? body.count : 0,
-    mode: typeof body.mode === 'string' ? body.mode.slice(0, 32) : 'unknown',
-    ts: Date.now()
-  };
-  particleSnapshots.push(snapshot);
-  if (particleSnapshots.length > MAX_SNAPSHOTS) {
-    particleSnapshots = particleSnapshots.slice(-MAX_SNAPSHOTS);
-  }
-  res.status(201).json({ ok: true, snapshot });
-});
-
-app.get('/api/stats', (req, res) => {
-  res.json({ ok: true, stats: aggregateStats() });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ ok: true, status: 'healthy', uptime: (Date.now() - startTime) / 1000 });
-});
-
-function aggregateStats() {
-  const now = Date.now();
-  let fpsSum = 0;
-  let particleSum = 0;
-  let n = 0;
-  for (const [, s] of clientStats) {
-    if (now - s.ts < 10000) {
-      fpsSum += s.fps;
-      particleSum += s.count;
-      n++;
-    }
-  }
-  return {
-    clients: clientStats.size,
-    activeClients: n,
-    avgFps: n ? Math.round((fpsSum / n) * 10) / 10 : 0,
-    totalParticles: particleSum,
-    snapshots: particleSnapshots.length,
-    uptimeSec: Math.round((now - startTime) / 1000)
-  };
+  res.end(body);
 }
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+function sendError(res, status, message) {
+  sendJSON(res, status, { error: message });
+}
 
-wss.on('connection', (ws) => {
-  clientStats.set(ws, { fps: 0, count: 0, ts: Date.now() });
-
-  ws.send(JSON.stringify({ type: 'welcome', stats: aggregateStats() }));
-
-  ws.on('message', (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
+function serveFile(res, filePath) {
+  fs.stat(filePath, (err, stats) => {
+    if (err || !stats.isFile()) {
+      sendError(res, 404, 'Not found');
       return;
     }
-    if (msg && msg.type === 'stats') {
-      clientStats.set(ws, {
-        fps: Number(msg.fps) || 0,
-        count: Number(msg.count) || 0,
-        ts: Date.now()
-      });
-    }
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': stats.size,
+      'Cache-Control': 'no-cache'
+    });
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => {
+      // Headers already sent; just terminate the connection.
+      res.destroy();
+    });
+    stream.pipe(res);
   });
+}
 
-  ws.on('close', () => clientStats.delete(ws));
-  ws.on('error', () => clientStats.delete(ws));
-});
-
-// Broadcast aggregate stats to all clients every 2 seconds
-setInterval(() => {
-  const payload = JSON.stringify({ type: 'stats', stats: aggregateStats() });
-  for (const client of wss.clients) {
-    if (client.readyState === 1) client.send(payload);
+const server = http.createServer((req, res) => {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  } catch (_) {
+    sendError(res, 400, 'Bad request');
+    return;
   }
-}, 2000);
 
-server.listen(PORT, () => {
-  console.log(`Particle exchange server running at http://localhost:${PORT}`);
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendError(res, 405, 'Method not allowed');
+    return;
+  }
+
+  // ---- API ----
+  if (pathname === '/api/config') {
+    sendJSON(res, 200, CLIENT_CONFIG);
+    return;
+  }
+  if (pathname === '/api/health') {
+    sendJSON(res, 200, { status: 'ok', uptime: process.uptime() });
+    return;
+  }
+
+  // ---- Static files (with path-traversal protection) ----
+  if (pathname === '/') pathname = '/' + INDEX_FILE;
+  const resolved = path.normalize(path.join(ROOT, pathname));
+  if (resolved !== ROOT && !resolved.startsWith(ROOT + path.sep)) {
+    sendError(res, 403, 'Forbidden');
+    return;
+  }
+  serveFile(res, resolved);
 });
+
+server.listen(PORT, HOST, () => {
+  console.log(`◈ Particle Exchange server running at http://localhost:${PORT}`);
+  console.log(`  serving ${path.join(ROOT, INDEX_FILE)}`);
+});
+
+// Graceful shutdown
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    console.log(`\nReceived ${sig}, shutting down...`);
+    server.close(() => process.exit(0));
+    // Force-exit if connections keep the server alive too long.
+    setTimeout(() => process.exit(0), 2000).unref();
+  });
+}
