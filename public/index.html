@@ -9,12 +9,16 @@
 <body>
   <canvas id="canvas"></canvas>
 
+  <video id="cam-preview" playsinline muted></video>
+  <canvas id="cam-overlay" width="320" height="240"></canvas>
+
   <div id="hud" class="panel">
     <div class="hud-title">PARTICLE EXCHANGE</div>
     <div class="hud-row"><span>FPS</span><span id="hud-fps">0</span></div>
     <div class="hud-row"><span>Particles</span><span id="hud-count">0</span></div>
     <div class="hud-row"><span>Mode</span><span id="hud-mode">rainbow</span></div>
     <div class="hud-row"><span>Demo</span><span id="hud-demo">off</span></div>
+    <div class="hud-row"><span>Gesture</span><span id="hud-gesture">off</span></div>
   </div>
 
   <div id="stats-panel" class="panel">
@@ -38,6 +42,7 @@
       <li><b>P</b> screenshot</li>
       <li><b>D</b> auto-demo</li>
       <li><b>H</b> heatmap</li>
+      <li><b>C</b> webcam gestures</li>
     </ul>
   </div>
 

@@ -217,8 +217,262 @@
     return `rgba(255,255,255,${alpha})`;
   }
 
+  // ---------- Webcam Gestures (MediaPipe Hands) ----------
+  const camPreview = document.getElementById('cam-preview');
+  const camOverlay = document.getElementById('cam-overlay');
+  const camCtx = camOverlay.getContext('2d');
+  const hudGesture = document.getElementById('hud-gesture');
+
+  const MP_HANDS_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js';
+  const MP_CAM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js';
+  const MP_DRAW_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js';
+
+  const gesture = {
+    enabled: false,
+    loading: false,
+    tracking: false,
+    x: -9999, y: -9999,
+    rawX: 0, rawY: 0,
+    name: 'NONE',
+    pinch: false,
+    fist: false,
+    lostFrames: 0
+  };
+
+  let mpHands = null, mpCamera = null;
+  let gestureDrag = null;
+  let lastGestureNova = 0;
+  let gestureStream = null;
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Failed to load ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  function dist2d(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  function classifyHand(lm) {
+    const wrist = lm[0];
+    const scale = dist2d(wrist, lm[9]) || 0.001;
+    const ext = (tip, pip) => dist2d(lm[tip], wrist) > dist2d(lm[pip], wrist) * 1.15;
+    const index = ext(8, 6);
+    const middle = ext(12, 10);
+    const ring = ext(16, 14);
+    const pinky = ext(20, 18);
+    const pinching = dist2d(lm[4], lm[8]) < scale * 0.4;
+    if (pinching) return 'PINCH';
+    if (index && middle && !ring && !pinky) return 'VICTORY';
+    if (!index && !middle && !ring && !pinky) return 'FIST';
+    return 'POINT';
+  }
+
+  function onHandResults(results) {
+    drawHandSkeleton(results);
+    const hands = results.multiHandLandmarks;
+    if (!hands || hands.length === 0) {
+      if (++gesture.lostFrames > 8 && gesture.tracking) {
+        gesture.tracking = false;
+        gesture.name = 'NONE';
+        gesture.pinch = gesture.fist = false;
+        releaseGestureDrag();
+        mouse.active = false;
+        mouse.shift = keyShift;
+        if (gesture.enabled) {
+          hudGesture.textContent = 'on — show hand';
+          hudGesture.style.color = '#a4ffd0';
+        }
+      }
+      return;
+    }
+    gesture.lostFrames = 0;
+    const lm = hands[0];
+    const name = classifyHand(lm);
+    const anchor = (name === 'FIST') ? lm[9] : lm[8];
+    gesture.rawX = (1 - anchor.x) * W;
+    gesture.rawY = anchor.y * H;
+    if (!gesture.tracking) { gesture.x = gesture.rawX; gesture.y = gesture.rawY; }
+    gesture.tracking = true;
+    gesture.name = name;
+    gesture.pinch = (name === 'PINCH');
+    gesture.fist = (name === 'FIST');
+  }
+
+  function releaseGestureDrag() {
+    if (gestureDrag) {
+      gestureDrag.drag = false;
+      gestureDrag = null;
+    }
+  }
+
+  async function enableGestures() {
+    if (gesture.loading || gesture.enabled) return;
+    gesture.loading = true;
+    hudGesture.textContent = 'loading...';
+    hudGesture.style.color = '#ffd27f';
+    try {
+      if (!window.Hands) await loadScript(MP_HANDS_URL);
+      if (!window.Camera) await loadScript(MP_CAM_URL);
+      if (!window.drawConnectors) await loadScript(MP_DRAW_URL);
+
+      mpHands = new window.Hands({
+        locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+      });
+      mpHands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5
+      });
+      mpHands.onResults(onHandResults);
+
+      gestureStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      camPreview.srcObject = gestureStream;
+      await camPreview.play();
+
+      mpCamera = new window.Camera(camPreview, {
+        onFrame: async () => {
+          if (mpHands) await mpHands.send({ image: camPreview });
+        },
+        width: 320,
+        height: 240
+      });
+      await mpCamera.start();
+
+      gesture.enabled = true;
+      camPreview.style.display = 'block';
+      camOverlay.style.display = 'block';
+      hudGesture.textContent = 'on — show hand';
+      hudGesture.style.color = '#a4ffd0';
+    } catch (err) {
+      console.warn('Gesture init failed:', err);
+      hudGesture.textContent = 'unavailable';
+      hudGesture.style.color = '#ff8f7f';
+      teardownGestures();
+    } finally {
+      gesture.loading = false;
+    }
+  }
+
+  function teardownGestures() {
+    gesture.enabled = false;
+    gesture.tracking = false;
+    gesture.name = 'NONE';
+    gesture.pinch = gesture.fist = false;
+    releaseGestureDrag();
+    if (mpCamera) { try { mpCamera.stop(); } catch (_) {} mpCamera = null; }
+    if (gestureStream) {
+      for (const track of gestureStream.getTracks()) track.stop();
+      gestureStream = null;
+    }
+    camPreview.srcObject = null;
+    camPreview.style.display = 'none';
+    camOverlay.style.display = 'none';
+    mouse.active = false;
+    mouse.shift = keyShift;
+    hudGesture.textContent = 'off';
+    hudGesture.style.color = '';
+  }
+
+  function toggleGestures() {
+    if (gesture.loading) return;
+    if (gesture.enabled) {
+      teardownGestures();
+    } else {
+      enableGestures();
+    }
+  }
+
+  function applyGestureControl(dt) {
+    if (!gesture.enabled || !gesture.tracking) return;
+    const k = 1 - Math.pow(0.0005, dt);
+    gesture.x += (gesture.rawX - gesture.x) * k;
+    gesture.y += (gesture.rawY - gesture.y) * k;
+    mouse.x = gesture.x;
+    mouse.y = gesture.y;
+    mouse.active = true;
+    mouse.shift = gesture.fist || keyShift;
+
+    if (gesture.pinch) {
+      if (!gestureDrag) {
+        for (const v of vortices) {
+          const dx = gesture.x - v.x, dy = gesture.y - v.y;
+          if (dx * dx + dy * dy < 70 * 70) {
+            gestureDrag = v;
+            v.drag = true;
+            break;
+          }
+        }
+      }
+      if (gestureDrag) {
+        gestureDrag.x = gesture.x;
+        gestureDrag.y = gesture.y;
+      }
+    } else {
+      releaseGestureDrag();
+    }
+
+    if (gesture.name === 'VICTORY') {
+      const now = performance.now();
+      if (now - lastGestureNova > 2000) {
+        lastGestureNova = now;
+        explode(gesture.x, gesture.y);
+      }
+    }
+  }
+
+  function drawGestureCursor(t) {
+    if (!gesture.enabled || !gesture.tracking) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const hue = gesture.pinch ? 48 : gesture.fist ? 0 : gesture.name === 'VICTORY' ? 300 : 165;
+    const r = 18 + Math.sin(t * 5) * 3;
+
+    ctx.strokeStyle = `hsla(${hue},100%,70%,0.85)`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(gesture.x, gesture.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = `hsla(${hue},100%,80%,0.9)`;
+    ctx.beginPath();
+    ctx.arc(gesture.x, gesture.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    for (let i = 0; i < 4; i++) {
+      const a = i * Math.PI / 2 + t * 1.5;
+      ctx.strokeStyle = `hsla(${hue},100%,80%,0.5)`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(gesture.x + Math.cos(a) * (r + 5), gesture.y + Math.sin(a) * (r + 5));
+      ctx.lineTo(gesture.x + Math.cos(a) * (r + 12), gesture.y + Math.sin(a) * (r + 12));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawHandSkeleton(results) {
+    camCtx.clearRect(0, 0, 320, 240);
+    if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+    if (window.drawConnectors && window.HAND_CONNECTIONS) {
+      window.drawConnectors(camCtx, results.multiHandLandmarks[0], window.HAND_CONNECTIONS, { color: '#00e5ff', lineWidth: 2 });
+      window.drawLandmarks(camCtx, results.multiHandLandmarks[0], { color: '#ff2ec4', lineWidth: 1, radius: 3 });
+    }
+  }
+
   // ---------- Input ----------
-  const mouse = { x: -9999, y: -9999, down: false, shift: false, dragTarget: null, downX: 0, downY: 0, moved: false };
+  let keyShift = false;
+  const mouse = { x: -9999, y: -9999, down: false, shift: false, dragTarget: null, downX: 0, downY: 0, moved: false, active: false };
 
   canvas.addEventListener('mousedown', (e) => {
     initAudio();
@@ -273,7 +527,7 @@
   });
 
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Shift') mouse.shift = true;
+    if (e.key === 'Shift') { mouse.shift = true; keyShift = true; }
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     const k = e.key.toLowerCase();
     if (k >= '1' && k <= '5') {
@@ -288,11 +542,13 @@
       document.getElementById('hud-demo').textContent = demoOn ? 'on' : 'off';
     } else if (k === 'h') {
       heatmapOn = !heatmapOn;
+    } else if (k === 'c') {
+      toggleGestures();
     }
     initAudio();
   });
   window.addEventListener('keyup', (e) => {
-    if (e.key === 'Shift') mouse.shift = false;
+    if (e.key === 'Shift') { mouse.shift = false; keyShift = false; }
   });
 
   function screenshot() {
@@ -607,6 +863,12 @@
       hudFps.textContent = Math.round(fps);
       hudCount.textContent = particles.length;
 
+      if (gesture.enabled && gesture.tracking) {
+        const icon = gesture.fist ? '✊' : gesture.pinch ? '🤏' : gesture.name === 'VICTORY' ? '✌' : '☝';
+        hudGesture.textContent = icon + ' ' + gesture.name.toLowerCase();
+        hudGesture.style.color = gesture.fist ? '#ff8f7f' : gesture.pinch ? '#ffd27f' : '#a4ffd0';
+      }
+
       if (fps < 45) { lowFpsFrames++; highFpsFrames = 0; }
       else if (fps > 57) { highFpsFrames++; lowFpsFrames = 0; }
       else { lowFpsFrames = 0; highFpsFrames = 0; }
@@ -632,10 +894,12 @@
     const t = now * 0.001;
 
     if (demoOn) updateDemo(dt);
+    applyGestureControl(dt);
     syncParticleCount();
     rebuildGrid();
     updateParticles(dt);
     render(t, dt);
+    drawGestureCursor(t);
     updatePerf(dt);
     audioAmbientPulse(dt);
 

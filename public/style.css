@@ -139,10 +139,39 @@ html, body {
   border: none;
 }
 
+#cam-preview {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 240px;
+  height: 180px;
+  object-fit: cover;
+  transform: scaleX(-1);
+  border: 2px solid rgba(0, 229, 255, 0.5);
+  border-radius: 12px;
+  box-shadow: 0 0 24px rgba(0, 229, 255, 0.3);
+  z-index: 10;
+  display: none;
+  pointer-events: none;
+}
+
+#cam-overlay {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 240px;
+  height: 180px;
+  transform: scaleX(-1);
+  z-index: 11;
+  display: none;
+  pointer-events: none;
+}
+
 @media (max-width: 760px) {
   .panel { font-size: 11px; padding: 10px 12px; }
   #help-panel { display: none; }
   #stats-panel { top: auto; bottom: 16px; right: 16px; }
   #settings-panel { bottom: 16px; left: 50%; right: auto; transform: translateX(-50%); }
   #settings-panel.hidden { transform: translate(-50%, 12px); }
+  #cam-preview, #cam-overlay { width: 160px; height: 120px; }
 }
